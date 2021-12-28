@@ -125,15 +125,17 @@ async fn run(name: &str, image: &str) -> Result<(), String> {
         bold = style::Bold,
         reset = style::Reset
     );
-
     pull_image(&docker, image).await?;
 
     println!("Starting container...");
-
     let ip = start_container(&docker, name, image).await?;
 
     println!("New IP: {}\n", ip);
 
+    // wait
+    sleep(Duration::from_secs(5)).await;
+
+    println!("Redirecting traffic to new deployment...");
     update_proxy(name, &ip, 3000).await?;
 
     Ok(())
