@@ -115,7 +115,7 @@ async fn update_proxy(name: &str, ip: &str, port: i32) -> Result<(), String> {
     Ok(())
 }
 
-async fn run(name: &str, image: &str) -> Result<(), String> {
+async fn run(name: &str, image: &str, port: i32) -> Result<(), String> {
     let docker =
         Docker::connect_with_local_defaults().expect("Error connecting to Docker - is it running?");
 
@@ -136,7 +136,7 @@ async fn run(name: &str, image: &str) -> Result<(), String> {
     sleep(Duration::from_secs(5)).await;
 
     println!("Redirecting traffic to new deployment...");
-    update_proxy(name, &ip, 3000).await?;
+    update_proxy(name, &ip, port).await?;
 
     Ok(())
 }
@@ -157,10 +157,17 @@ async fn main() {
                 .takes_value(true)
                 .required(true),
         )
+        .arg(
+            Arg::with_name("port")
+                .long("port")
+                .takes_value(true)
+                .default_value("3000"),
+        )
         .get_matches();
 
     let image = matches.value_of("image").unwrap();
     let name = matches.value_of("name").unwrap();
+    let port: i32 = matches.value_of("port").unwrap().parse().unwrap();
 
     if lock::is_locked(name) {
         println!("Deployment locked, waiting for release...");
@@ -174,7 +181,7 @@ async fn main() {
 
     lock::lock(name);
 
-    if let Err(err) = run(name, image).await {
+    if let Err(err) = run(name, image, port).await {
         println!(
             "{red}{bold}Deployment failed{reset}: {}",
             err,
