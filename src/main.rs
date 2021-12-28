@@ -1,17 +1,154 @@
-use std::process::exit;
+#[macro_use]
+extern crate lazy_static;
 
-use bollard::{image::CreateImageOptions, Docker};
+use std::{process::exit, time::Duration};
+
+use bollard::{
+    container::Config,
+    container::CreateContainerOptions,
+    image::CreateImageOptions,
+    models::{EndpointSettings, HostConfig, RestartPolicy, RestartPolicyNameEnum},
+    network::ConnectNetworkOptions,
+    Docker,
+};
 use clap::{App, Arg};
 use futures::StreamExt;
-use termion::style;
+use reqwest::Client;
+use serde_json::json;
+use termion::{color, style};
+use tokio::time::sleep;
 
-#[tokio::main]
-async fn main() {
+mod lock;
+
+async fn pull_image(docker: &Docker, image: &str) -> Result<(), String> {
+    let mut stream = docker.create_image(
+        Some(CreateImageOptions {
+            from_image: image,
+            ..Default::default()
+        }),
+        None,
+        None,
+    );
+
+    while let Some(log) = stream.next().await {
+        if let Err(err) = log {
+            return Err(err.to_string());
+        }
+    }
+
+    Ok(())
+}
+
+async fn start_container(docker: &Docker, name: &str, image: &str) -> Result<String, String> {
+    // Create the container
+    let container = docker
+        .create_container::<&str, &str>(
+            Some(CreateContainerOptions {
+                name: &format!("{}_next", name),
+            }),
+            Config {
+                image: Some(image),
+                host_config: Some(HostConfig {
+                    restart_policy: Some(RestartPolicy {
+                        name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Connect to HaaS admin network
+    docker
+        .connect_network(
+            "haas_admin",
+            ConnectNetworkOptions {
+                container: &container.id,
+                endpoint_config: EndpointSettings {
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Start the container
+    docker
+        .start_container::<String>(&container.id, None)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let container = docker
+        .inspect_container(&container.id, None)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let ip = container
+        .network_settings
+        .unwrap()
+        .networks
+        .unwrap()
+        .get("haas_admin")
+        .unwrap()
+        .ip_address
+        .to_owned()
+        .unwrap();
+
+    Ok(ip)
+}
+
+async fn update_proxy(name: &str, ip: &str, port: i32) -> Result<(), String> {
+    let client = Client::new();
+
+    let id = format!("{}_upstream", name);
+
+    client
+        .patch(format!("http://localhost:2019/id/{}", id))
+        .json(&json!({ "@id": id, "dial": format!("{}:{}", ip, port) }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+async fn run(name: &str, image: &str) -> Result<(), String> {
     let docker =
         Docker::connect_with_local_defaults().expect("Error connecting to Docker - is it running?");
 
+    println!(
+        "Pulling image: {bold}{}{reset}\n",
+        image,
+        bold = style::Bold,
+        reset = style::Reset
+    );
+
+    pull_image(&docker, image).await?;
+
+    println!("Starting container...");
+
+    let ip = start_container(&docker, name, image).await?;
+
+    println!("New IP: {}\n", ip);
+
+    update_proxy(name, &ip, 3000).await?;
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
     let matches = App::new("HaaS Deployer 9000")
         .author("Caleb Denio 🤺")
+        .arg(
+            Arg::with_name("name")
+                .long("name")
+                .takes_value(true)
+                .required(true),
+        )
         .arg(
             Arg::with_name("image")
                 .long("image")
@@ -21,54 +158,40 @@ async fn main() {
         .get_matches();
 
     let image = matches.value_of("image").unwrap();
+    let name = matches.value_of("name").unwrap();
 
-    println!(
-        "Pulling image: {bold}{}{reset}\n",
-        image,
-        bold = style::Bold,
-        reset = style::Reset
-    );
+    if lock::is_locked(name) {
+        println!("Deployment locked, waiting for release...");
 
-    let mut stream = docker.create_image(
-        Some(CreateImageOptions {
-            from_image: image,
-            tag: "main",
-            ..Default::default()
-        }),
-        None,
-        None,
-    );
+        while lock::is_locked(name) {
+            println!("still locked...");
 
-    while let Some(log) = stream.next().await {
-        match log {
-            Ok(x) => {
-                if let Some(progress) = x.progress {
-                    println!(
-                        "  {faint}|{reset} {}\t{bold}{}{reset}",
-                        x.status.unwrap(),
-                        progress,
-                        faint = style::Faint,
-                        bold = style::Bold,
-                        reset = style::Reset
-                    )
-                } else {
-                    println!(
-                        "  {faint}|{reset} {}",
-                        x.status.unwrap(),
-                        faint = style::Faint,
-                        reset = style::Reset
-                    )
-                }
-            }
-            Err(x) => {
-                println!(
-                    "  {faint}|{reset} ❌ {}",
-                    x.to_string(),
-                    faint = style::Faint,
-                    reset = style::Reset
-                );
-                exit(1);
-            }
+            sleep(Duration::from_secs(5)).await;
         }
+    }
+
+    lock::lock(name);
+
+    if let Err(err) = run(name, image).await {
+        println!(
+            "{red}{bold}Deployment failed{reset}: {}",
+            err,
+            red = color::Fg(color::Red),
+            bold = style::Bold,
+            reset = style::Reset
+        );
+
+        lock::unlock(name);
+
+        exit(1);
+    } else {
+        println!(
+            "{green}{bold}Deployment succeeded!{reset}",
+            green = color::Fg(color::Green),
+            bold = style::Bold,
+            reset = style::Reset
+        );
+
+        lock::unlock(name);
     }
 }
