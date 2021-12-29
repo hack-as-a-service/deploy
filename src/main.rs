@@ -4,8 +4,8 @@ extern crate lazy_static;
 use std::{process::exit, time::Duration};
 
 use bollard::{
-    container::Config,
-    container::CreateContainerOptions,
+    container::{Config, RenameContainerOptions},
+    container::{CreateContainerOptions, RemoveContainerOptions},
     image::CreateImageOptions,
     models::{EndpointSettings, HostConfig, RestartPolicy, RestartPolicyNameEnum},
     network::ConnectNetworkOptions,
@@ -125,6 +125,31 @@ async fn update_proxy(name: &str, ip: &str, port: i32) -> Result<(), String> {
     Ok(())
 }
 
+async fn cleanup(docker: &Docker, name: &str) -> Result<(), String> {
+    if docker.inspect_container(name, None).await.is_ok() {
+        // Remove old container
+        docker
+            .remove_container(
+                name,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        println!("hi");
+    }
+
+    docker
+        .rename_container(&format!("{}_next", name), RenameContainerOptions { name })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 async fn run(name: &str, image: &str, port: i32) -> Result<(), String> {
     let docker =
         Docker::connect_with_local_defaults().expect("Error connecting to Docker - is it running?");
@@ -145,8 +170,11 @@ async fn run(name: &str, image: &str, port: i32) -> Result<(), String> {
     // wait
     sleep(Duration::from_secs(5)).await;
 
-    println!("Redirecting traffic to new deployment...");
+    println!("Redirecting traffic to new deployment...\n");
     update_proxy(name, &ip, port).await?;
+
+    println!("Cleaning up...\n");
+    cleanup(&docker, name).await?;
 
     Ok(())
 }
