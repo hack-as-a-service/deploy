@@ -138,8 +138,6 @@ async fn cleanup(docker: &Docker, name: &str) -> Result<(), String> {
             )
             .await
             .map_err(|e| e.to_string())?;
-
-        println!("hi");
     }
 
     docker
