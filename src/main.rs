@@ -45,6 +45,10 @@ async fn start_container(docker: &Docker, name: &str, image: &str) -> Result<Str
         .map(|v| v.lines().map(|e| e.to_owned()).collect::<Vec<String>>())
         .ok();
 
+    if let Some(env) = &env {
+        println!("Setting {} environment variables", env.len());
+    }
+
     // Create the container
     let container = docker
         .create_container::<String, String>(
