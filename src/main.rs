@@ -16,7 +16,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde_json::json;
 use termion::{color, style};
-use tokio::time::sleep;
+use tokio::{fs, time::sleep};
 
 mod lock;
 
@@ -40,14 +40,20 @@ async fn pull_image(docker: &Docker, image: &str) -> Result<(), String> {
 }
 
 async fn start_container(docker: &Docker, name: &str, image: &str) -> Result<String, String> {
+    let env = fs::read_to_string(format!("/home/deploy/.{}.env", name))
+        .await
+        .map(|v| v.lines().map(|e| e.to_owned()).collect::<Vec<String>>())
+        .ok();
+
     // Create the container
     let container = docker
-        .create_container::<&str, &str>(
+        .create_container::<String, String>(
             Some(CreateContainerOptions {
-                name: &format!("{}_next", name),
+                name: format!("{}_next", name),
             }),
             Config {
-                image: Some(image),
+                image: Some(String::from(image)),
+                env,
                 host_config: Some(HostConfig {
                     restart_policy: Some(RestartPolicy {
                         name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
