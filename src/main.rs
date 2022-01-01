@@ -39,7 +39,12 @@ async fn pull_image(docker: &Docker, image: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn start_container(docker: &Docker, name: &str, image: &str) -> Result<String, String> {
+async fn start_container(
+    docker: &Docker,
+    name: &str,
+    image: &str,
+    docker_socket: bool,
+) -> Result<String, String> {
     let env = fs::read_to_string(format!("/home/deploy/.{}.env", name))
         .await
         .map(|v| v.lines().map(|e| e.to_owned()).collect::<Vec<String>>())
@@ -63,6 +68,13 @@ async fn start_container(docker: &Docker, name: &str, image: &str) -> Result<Str
                         name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
                         ..Default::default()
                     }),
+                    binds: if docker_socket {
+                        Some(vec![String::from(
+                            "/var/run/docker.sock:/var/run/docker.sock",
+                        )])
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -148,7 +160,7 @@ async fn cleanup(docker: &Docker, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn run(name: &str, image: &str, port: i32) -> Result<(), String> {
+async fn run(name: &str, image: &str, port: i32, docker_socket: bool) -> Result<(), String> {
     let docker =
         Docker::connect_with_local_defaults().expect("Error connecting to Docker - is it running?");
 
@@ -161,7 +173,7 @@ async fn run(name: &str, image: &str, port: i32) -> Result<(), String> {
     pull_image(&docker, image).await?;
 
     println!("Starting container...");
-    let ip = start_container(&docker, name, image).await?;
+    let ip = start_container(&docker, name, image, docker_socket).await?;
 
     println!("New IP: {}\n", ip);
 
@@ -199,10 +211,16 @@ async fn main() {
                 .takes_value(true)
                 .default_value("3000"),
         )
+        .arg(
+            Arg::with_name("docker-socket")
+                .long("docker-socket")
+                .help("Mount Docker socket into container"),
+        )
         .get_matches();
 
     let image = matches.value_of("image").unwrap();
     let name = matches.value_of("name").unwrap();
+    let docker_socket = matches.is_present("docker-socket");
     let port: i32 = matches.value_of("port").unwrap().parse().unwrap();
 
     if lock::is_locked(name) {
@@ -217,7 +235,7 @@ async fn main() {
 
     lock::lock(name);
 
-    if let Err(err) = run(name, image, port).await {
+    if let Err(err) = run(name, image, port, docker_socket).await {
         println!(
             "{red}{bold}Deployment failed{reset}: {}",
             err,
