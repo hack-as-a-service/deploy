@@ -75,23 +75,11 @@ async fn start_container(
                     } else {
                         None
                     },
+                    // Connect to HaaS admin network
+                    network_mode: Some(String::from("haas_admin")),
                     ..Default::default()
                 }),
                 ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Connect to HaaS admin network
-    docker
-        .connect_network(
-            "haas_admin",
-            ConnectNetworkOptions {
-                container: &container.id,
-                endpoint_config: EndpointSettings {
-                    ..Default::default()
-                },
             },
         )
         .await
